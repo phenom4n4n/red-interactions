@@ -295,6 +295,7 @@ class SlashCommand:
         else:
             data = await self.http.edit_slash_command(self.id, payload)
         self._parse_response_data(data)
+        await self.save_config()
 
     async def delete(self):
         self.remove_from_cache()
