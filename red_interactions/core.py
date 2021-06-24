@@ -60,6 +60,7 @@ async def initialize(bot: Red, *, application_id: int = None) -> InteractionStat
     if application_id is None:
         application_id = await get_application_id(bot)
     _state = InteractionState(bot, application_id, config)
+    await _state.cache_commands()
     _initialized = True
     return _state
 

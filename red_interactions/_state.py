@@ -20,7 +20,7 @@ class InteractionState:
         self.application_id = application_id
         self.http = InteractionsHTTPClient(self)
         self.command_cache: Dict[int, SlashCommand] = {}
-        self.config = Config
+        self.config = config
 
         bot._connection.parsers["INTERACTION_CREATE"] = self.parse_interaction_create
 
@@ -29,8 +29,9 @@ class InteractionState:
 
     async def cache_commands(self):
         commands = await self.config.commands()
-        for command_id, command_data in commands.items():
+        for command_data in commands.values():
             command = SlashCommand.from_dict(self, command_data)
+            command.add_to_cache()
 
     def get_command(self, command_id: int, /) -> Optional[SlashCommand]:
         return self.command_cache.get(command_id)

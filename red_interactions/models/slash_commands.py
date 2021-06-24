@@ -93,119 +93,6 @@ class ResponseOption:
         return cls(type=type, name=data["name"], value=data["value"])
 
 
-class InteractionCommand(InteractionResponse):
-    __slots__ = ("command_name", "command_id", "options", "_cs_content")
-
-    def __init__(self, *, state: "InteractionState", data: dict):
-        super().__init__(state=state, data=data)
-        self.command_name = self.interaction_data["name"]
-        self.command_id = int(self.interaction_data["id"])
-        self.options: List[ResponseOption] = []
-        self._parse_options(
-            self.interaction_data.get("options", []), self.interaction_data.get("resolved", {})
-        )
-
-    def __repr__(self) -> str:
-        return f"<{type(self).__name__} id={self.id} command={self.command!r} options={self.options!r} channel={self.channel!r} author={self.author!r}>"
-
-    @discord.utils.cached_slot_property("_cs_content")
-    def content(self):
-        items = [f"/{self.command_name}"]
-        for option in self.options:
-            items.append(f"`{option.name}: {option.value}`")
-        return " ".join(items)
-
-    @property
-    def command(self):
-        return self.state.get_command(self.command_id) or UnknownCommand(id=self.command_id)
-
-    @property
-    def jump_url(self):
-        guild_id = getattr(self.guild, "id", "@me")
-        return f"https://discord.com/channels/{guild_id}/{self.channel_id}/{self.id}"
-
-    def _parse_options(self, options: List[dict], resolved: Dict[str, Dict[str, dict]]):
-        for o in options:
-            option = ResponseOption.from_dict(o)
-            handler_name = f"_handle_option_{option.type.name.lower()}"
-            try:
-                handler = getattr(self, handler_name)
-            except AttributeError:
-                pass
-            else:
-                try:
-                    option = handler(o, option, resolved)
-                except Exception as error:
-                    log.exception(
-                        "Failed to handle option data for option:\n%r", o, exc_info=error
-                    )
-            self.options.append(option)
-
-    def _handle_option_channel(
-        self, data: dict, option: ResponseOption, resolved: Dict[str, Dict[str, dict]]
-    ):
-        channel_id = int(data["value"])
-        resolved_channel = resolved["channels"][data["value"]]
-        if self.guild_id:
-            if channel := self.guild.get_channel(channel_id):
-                pass
-            else:
-                channel = discord.TextChannel(
-                    state=self._discord_state, guild=self.guild, data=resolved_channel
-                )
-        else:
-            if channel := self._discord_state._get_private_channel(channel_id):
-                pass
-            else:
-                channel = discord.DMChannel(
-                    state=self._discord_state, me=self.bot.user, data=resolved_channel
-                )
-        option.set_value(channel)
-        return option
-
-    def _handle_option_user(
-        self, data: dict, option: ResponseOption, resolved: Dict[str, Dict[str, dict]]
-    ):
-        user_id = int(data["value"])
-        resolved_user = resolved["users"][data["value"]]
-        if self.guild_id:
-            if user := self.guild.get_member(user_id):
-                pass
-            else:
-                user = discord.Member(
-                    guild=self.guild, data=resolved_user, state=self._discord_state
-                )
-                self.guild._add_member(user)
-        else:
-            user = self._discord_state.store_user(resolved_user)
-        option.set_value(user)
-        return option
-
-    def _handle_option_role(
-        self, data: dict, option: ResponseOption, resolved: Dict[str, Dict[str, dict]]
-    ):
-        role_id = int(data["value"])
-        resolved_role = resolved["roles"][data["value"]]
-        if self.guild_id:
-            if role := self.guild.get_role(role_id):
-                pass
-            else:
-                role = discord.Role(guild=self.guild, data=resolved_role, state=self)
-                self.guild._add_role(role)
-            option.set_value(role)
-        return option
-
-    def to_reference(self, *args, **kwargs):
-        # return None to prevent reply since interaction responses already reply (visually)
-        # additionally, replying to an interaction response raises
-        # message_reference: Unknown message
-        return
-
-    @property
-    def me(self):
-        return self.guild.me if self.guild else self.bot.user
-
-
 class SlashOptionChoice:
     __slots__ = ("name", "value")
 
@@ -364,6 +251,10 @@ class SlashCommand:
             options=options,
         )
 
+    async def save_config(self):
+        async with self.state.config.commands() as commands:
+            commands[self.id] = self.to_dict()
+
     def _parse_response_data(self, data: dict):
         _id = discord.utils._get_as_snowflake(data, "id")
         application_id = discord.utils._get_as_snowflake(data, "application_id")
@@ -385,6 +276,7 @@ class SlashCommand:
         else:
             data = await self.http.add_slash_command(self.to_request())
         self._parse_response_data(data)
+        await self.save_config()
         self.add_to_cache()
 
     async def edit(
@@ -410,6 +302,11 @@ class SlashCommand:
             await self.http.remove_guild_slash_command(self.guild_id, self.id)
         else:
             await self.http.remove_slash_command(self.id)
+        async with self.state.config.commands() as commands:
+            try:
+                del commands[self.id]
+            except KeyError:
+                pass
 
     def add_to_cache(self):
         self.state.command_cache[self.id] = self
@@ -419,3 +316,116 @@ class SlashCommand:
             del self.state.command_cache[self.id]
         except KeyError:
             pass
+
+
+class InteractionCommand(InteractionResponse):
+    __slots__ = ("command_name", "command_id", "options", "_cs_content")
+
+    def __init__(self, *, state: "InteractionState", data: dict):
+        super().__init__(state=state, data=data)
+        self.command_name = self.interaction_data["name"]
+        self.command_id = int(self.interaction_data["id"])
+        self.options: List[ResponseOption] = []
+        self._parse_options(
+            self.interaction_data.get("options", []), self.interaction_data.get("resolved", {})
+        )
+
+    def __repr__(self) -> str:
+        return f"<{type(self).__name__} id={self.id} command={self.command!r} options={self.options!r} channel={self.channel!r} author={self.author!r}>"
+
+    @discord.utils.cached_slot_property("_cs_content")
+    def content(self):
+        items = [f"/{self.command_name}"]
+        for option in self.options:
+            items.append(f"`{option.name}: {option.value}`")
+        return " ".join(items)
+
+    @property
+    def command(self) -> Union[SlashCommand, UnknownCommand]:
+        return self.state.get_command(self.command_id) or UnknownCommand(id=self.command_id)
+
+    @property
+    def jump_url(self):
+        guild_id = getattr(self.guild, "id", "@me")
+        return f"https://discord.com/channels/{guild_id}/{self.channel_id}/{self.id}"
+
+    def _parse_options(self, options: List[dict], resolved: Dict[str, Dict[str, dict]]):
+        for o in options:
+            option = ResponseOption.from_dict(o)
+            handler_name = f"_handle_option_{option.type.name.lower()}"
+            try:
+                handler = getattr(self, handler_name)
+            except AttributeError:
+                pass
+            else:
+                try:
+                    option = handler(o, option, resolved)
+                except Exception as error:
+                    log.exception(
+                        "Failed to handle option data for option:\n%r", o, exc_info=error
+                    )
+            self.options.append(option)
+
+    def _handle_option_channel(
+        self, data: dict, option: ResponseOption, resolved: Dict[str, Dict[str, dict]]
+    ):
+        channel_id = int(data["value"])
+        resolved_channel = resolved["channels"][data["value"]]
+        if self.guild_id:
+            if channel := self.guild.get_channel(channel_id):
+                pass
+            else:
+                channel = discord.TextChannel(
+                    state=self._discord_state, guild=self.guild, data=resolved_channel
+                )
+        else:
+            if channel := self._discord_state._get_private_channel(channel_id):
+                pass
+            else:
+                channel = discord.DMChannel(
+                    state=self._discord_state, me=self.bot.user, data=resolved_channel
+                )
+        option.set_value(channel)
+        return option
+
+    def _handle_option_user(
+        self, data: dict, option: ResponseOption, resolved: Dict[str, Dict[str, dict]]
+    ):
+        user_id = int(data["value"])
+        resolved_user = resolved["users"][data["value"]]
+        if self.guild_id:
+            if user := self.guild.get_member(user_id):
+                pass
+            else:
+                user = discord.Member(
+                    guild=self.guild, data=resolved_user, state=self._discord_state
+                )
+                self.guild._add_member(user)
+        else:
+            user = self._discord_state.store_user(resolved_user)
+        option.set_value(user)
+        return option
+
+    def _handle_option_role(
+        self, data: dict, option: ResponseOption, resolved: Dict[str, Dict[str, dict]]
+    ):
+        role_id = int(data["value"])
+        resolved_role = resolved["roles"][data["value"]]
+        if self.guild_id:
+            if role := self.guild.get_role(role_id):
+                pass
+            else:
+                role = discord.Role(guild=self.guild, data=resolved_role, state=self)
+                self.guild._add_role(role)
+            option.set_value(role)
+        return option
+
+    def to_reference(self, *args, **kwargs):
+        # return None to prevent reply since interaction responses already reply (visually)
+        # additionally, replying to an interaction response raises
+        # message_reference: Unknown message
+        return
+
+    @property
+    def me(self):
+        return self.guild.me if self.guild else self.bot.user
